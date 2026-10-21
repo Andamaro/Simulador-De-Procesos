@@ -30,10 +30,12 @@ class Segment:
     start: int
     end: int
     ready: tuple[str, ...] = ()   # cola de listos al iniciar el tramo
+    overhead: bool = False        # True: la CPU está haciendo un cambio de contexto
 
     @property
     def idle(self) -> bool:
-        return self.name is None
+        """CPU sin trabajo (no cuenta el cambio de contexto)."""
+        return self.name is None and not self.overhead
 
     @property
     def length(self) -> int:
@@ -79,6 +81,32 @@ class Result:
     @property
     def makespan(self) -> int:
         return self.segments[-1].end if self.segments else 0
+
+    def segment_at(self, t: float) -> Segment | None:
+        for s in self.segments:
+            if s.start <= t < s.end:
+                return s
+        return None
+
+    def queue_at(self, t: float) -> tuple[str | None, list[str]]:
+        """(proceso en ejecución, cola de listos) en el instante t."""
+        seg = self.segment_at(t)
+        if seg is None:
+            return None, []
+        queue = list(seg.ready)
+        for m in self.metrics:           # llegadas ocurridas dentro del tramo
+            if seg.start < m.arrival <= t and m.name not in queue and m.name != seg.name:
+                queue.append(m.name)
+        if self.algorithm in ("SJF", "SRTF"):
+            info = {m.name: (i, m) for i, m in enumerate(self.metrics)}
+
+            def remaining(name: str) -> int:
+                done = sum(min(s.end, t) - s.start for s in self.segments
+                           if s.name == name and s.start < t)
+                return info[name][1].burst - done
+
+            queue.sort(key=lambda n: (remaining(n), info[n][1].arrival, info[n][0]))
+        return seg.name, queue
 
 
 def fmt(value: float, places: int = 3) -> str:

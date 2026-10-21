@@ -79,3 +79,66 @@ def test_fmt():
     assert fmt(13.16666) == "13.167"
     assert fmt(19.0) == "19"
     assert fmt(0.0005) == "0.001"
+
+
+def test_cola_de_listos_en_el_tiempo():
+    r = simulate("FCFS", EJERCICIO_PIZARRON)
+    assert r.queue_at(2.5) == ("A", ["B", "C"])
+    assert r.queue_at(11) == (None, [])
+    rr = simulate("RR", EJERCICIO_PIZARRON, quantum=2)
+    assert rr.queue_at(2) == ("B", ["C", "A"])
+
+
+def test_series_y_resumen():
+    from app.core.analytics import series, summary
+    for alg in ("FCFS", "SJF", "SRTF", "RR"):
+        r = simulate(alg, EJERCICIO_PIZARRON, quantum=2)
+        assert series(r, "done")[-1] == 4
+        assert series(r, "ready")[-1] == 0
+        assert series(r, "wait")[-1] == sum(m.wait for m in r.metrics)
+        assert series(r, "cpu")[-1] == 100.0
+    assert summary(simulate("FCFS", EJERCICIO_PIZARRON))["cola_maxima"] == 3
+    assert summary(simulate("FCFS", EJERCICIO_PIZARRON))["cambios"] == 3
+    assert summary(simulate("RR", EJERCICIO_PIZARRON, 2))["cambios"] == 6
+    assert summary(simulate("SRTF", EJERCICIO_PIZARRON))["cambios"] == 5
+
+
+def test_uso_de_cpu_con_hueco():
+    from app.core.analytics import summary
+    r = simulate("FCFS", [Process("A", 0, 2), Process("B", 4, 2)])
+    assert summary(r)["utilizacion"] == pytest.approx(4 / 6 * 100)
+
+
+def test_costo_de_cambio_de_contexto_fcfs():
+    from app.core.analytics import summary
+    r = simulate("FCFS", EJERCICIO_PIZARRON, switch_cost=1)
+    assert [(s.name, s.start, s.end, s.overhead) for s in r.segments] == [
+        ("A", 0, 5, False), (None, 5, 6, True), ("B", 6, 9, False), (None, 9, 10, True),
+        ("C", 10, 11, False), (None, 11, 12, True), ("D", 12, 14, False)]
+    assert (r.avg_service, r.avg_wait) == (8.25, 5.5)
+    s = summary(r)
+    assert s["cambios"] == 3 and s["tiempo_cambios"] == 3
+    assert s["utilizacion"] == pytest.approx(11 / 14 * 100)
+
+
+def test_costo_cero_no_altera_nada():
+    for alg in ("FCFS", "SJF", "SRTF", "RR"):
+        assert simulate(alg, EJERCICIO_LIBRETA, 3, 0).segments == simulate(alg, EJERCICIO_LIBRETA, 3).segments
+
+
+def test_costo_invariantes_todos_los_algoritmos():
+    from app.core.analytics import series, summary
+    for alg in ("FCFS", "SJF", "SRTF", "RR"):
+        for cost in (1, 2):
+            r = simulate(alg, EJERCICIO_LIBRETA, 3, cost)
+            s = summary(r)
+            assert sum(x.length for x in r.segments if x.name) == 35
+            assert s["tiempo_cambios"] == s["cambios"] * cost
+            assert series(r, "wait")[-1] == sum(m.wait for m in r.metrics)
+            ends = [x.end for x in r.segments]
+            assert all(a.end == b.start for a, b in zip(r.segments, r.segments[1:]))
+
+
+def test_rr_con_costo_no_cobra_si_sigue_el_mismo():
+    r = simulate("RR", [Process("A", 0, 6)], quantum=2, switch_cost=3)
+    assert not any(s.overhead for s in r.segments)

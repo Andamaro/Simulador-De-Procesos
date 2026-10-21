@@ -4,6 +4,10 @@ Desempates: por llegada y luego por orden de captura. Si la CPU queda sin
 trabajo se registra un tramo inactivo. En Round Robin, los procesos que llegan
 en el mismo instante en que expira un quantum entran a la cola antes que el
 proceso expropiado.
+
+Costo de cambio de contexto (opcional, 0 por defecto): cuando la CPU pasa de un
+proceso a otro distinto sin quedar inactiva, se intercala un tramo de esa
+duración. La decisión de a quién despachar se toma al inicio del tramo.
 """
 from __future__ import annotations
 
@@ -13,6 +17,7 @@ from typing import Callable, Sequence
 from .models import MAX_PROCESOS, Process, ProcessMetrics, Result, Segment, Step
 
 QUANTUM_DEFECTO = 2
+COSTO_MAX = 5
 
 
 def _validate(procs: Sequence[Process]) -> None:
@@ -25,7 +30,15 @@ def _validate(procs: Sequence[Process]) -> None:
         raise ValueError("Los nombres de proceso deben ser únicos.")
 
 
-def _nonpreemptive(procs: Sequence[Process], key: Callable) -> list[Segment]:
+def _switch(segs: list[Segment], t: int, name: str, cost: int, ready) -> int:
+    """Intercala un cambio de contexto si cambia el proceso y no hubo hueco."""
+    if cost > 0 and segs and segs[-1].name is not None and segs[-1].name != name:
+        segs.append(Segment(None, t, t + cost, tuple(ready), True))
+        return t + cost
+    return t
+
+
+def _nonpreemptive(procs: Sequence[Process], key: Callable, cost: int) -> list[Segment]:
     pending = list(enumerate(procs))
     t, segs = 0, []
     while pending:
@@ -36,21 +49,25 @@ def _nonpreemptive(procs: Sequence[Process], key: Callable) -> list[Segment]:
             t = nxt
             continue
         i, p = avail[0]
-        segs.append(Segment(p.name, t, t + p.burst, tuple(q.name for _, q in avail[1:])))
+        t2 = _switch(segs, t, p.name, cost, [q.name for _, q in avail])
+        if t2 != t:
+            t = t2
+            avail = sorted((x for x in pending if x[1].arrival <= t), key=key)
+        segs.append(Segment(p.name, t, t + p.burst, tuple(q.name for j, q in avail if j != i)))
         t += p.burst
         pending.remove((i, p))
     return segs
 
 
-def _fcfs(procs):
-    return _nonpreemptive(procs, key=lambda x: (x[1].arrival, x[0]))
+def _fcfs(procs, cost):
+    return _nonpreemptive(procs, lambda x: (x[1].arrival, x[0]), cost)
 
 
-def _sjf(procs):
-    return _nonpreemptive(procs, key=lambda x: (x[1].burst, x[1].arrival, x[0]))
+def _sjf(procs, cost):
+    return _nonpreemptive(procs, lambda x: (x[1].burst, x[1].arrival, x[0]), cost)
 
 
-def _srtf(procs):
+def _srtf(procs, cost):
     rem = {i: p.burst for i, p in enumerate(procs)}
     t, segs = 0, []
     while rem:
@@ -62,6 +79,10 @@ def _srtf(procs):
             t = nxt
             continue
         i = avail[0]
+        t2 = _switch(segs, t, procs[i].name, cost, [procs[j].name for j in avail])
+        if t2 != t:
+            t = t2
+            avail = sorted((j for j in rem if procs[j].arrival <= t), key=order)
         end = t + rem[i]
         future = [procs[j].arrival for j in rem if procs[j].arrival > t]
         if future:
@@ -70,7 +91,7 @@ def _srtf(procs):
         if last and last.name == procs[i].name and last.end == t:
             segs[-1] = Segment(last.name, last.start, end, last.ready)
         else:
-            segs.append(Segment(procs[i].name, t, end, tuple(procs[j].name for j in avail[1:])))
+            segs.append(Segment(procs[i].name, t, end, tuple(procs[j].name for j in avail if j != i)))
         rem[i] -= end - t
         t = end
         if rem[i] == 0:
@@ -78,7 +99,7 @@ def _srtf(procs):
     return segs
 
 
-def _rr(procs, quantum: int):
+def _rr(procs, quantum: int, cost: int):
     if quantum < 1:
         raise ValueError("El quantum debe ser al menos 1.")
     n = len(procs)
@@ -101,6 +122,10 @@ def _rr(procs, quantum: int):
             t = nxt
             continue
         i = queue.popleft()
+        t2 = _switch(segs, t, procs[i].name, cost, [procs[i].name] + [procs[j].name for j in queue])
+        if t2 != t:
+            t = t2
+            admit(t)
         run = min(quantum, rem[i])
         segs.append(Segment(procs[i].name, t, t + run, tuple(procs[j].name for j in queue)))
         t += run
@@ -112,7 +137,7 @@ def _rr(procs, quantum: int):
 
 
 def _metrics(procs: Sequence[Process], segs: list[Segment]) -> list[ProcessMetrics]:
-    finish = {s.name: s.end for s in segs if not s.idle}
+    finish = {s.name: s.end for s in segs if s.name is not None}
     out = []
     for p in procs:
         f = finish[p.name]
@@ -125,6 +150,9 @@ def _narrate(algorithm: str, segs: list[Segment], metrics: list[ProcessMetrics])
     by_name = {m.name: m for m in metrics}
     steps = []
     for s in segs:
+        if s.overhead:
+            steps.append(Step(s.start, f"Cambio de contexto: la CPU gasta {s.length} unidad(es) guardando un proceso y cargando otro."))
+            continue
         if s.idle:
             steps.append(Step(s.start, f"La CPU queda inactiva hasta t={s.end}: no hay procesos listos."))
             continue
@@ -135,7 +163,7 @@ def _narrate(algorithm: str, segs: list[Segment], metrics: list[ProcessMetrics])
             steps.append(Step(s.end, f"{s.name} termina. T = {m.finish} − {m.arrival} = {m.service}; "
                                      f"E = {m.service} − {m.burst} = {m.wait}."))
         elif algorithm == "RR":
-            steps.append(Step(s.end, f"A {s.name} se le acaba el quantum y regresa al final de la cola."))
+            steps.append(Step(s.end, f"Al proceso {s.name} se le acaba el quantum y regresa al final de la cola."))
         else:
             steps.append(Step(s.end, f"{s.name} es expropiado: llegó un proceso con menos tiempo restante."))
     return steps
@@ -149,16 +177,19 @@ ALGORITMOS = {
 }
 
 
-def simulate(algorithm: str, procs: Sequence[Process], quantum: int = QUANTUM_DEFECTO) -> Result:
+def simulate(algorithm: str, procs: Sequence[Process], quantum: int = QUANTUM_DEFECTO,
+             switch_cost: int = 0) -> Result:
     _validate(procs)
+    if switch_cost < 0:
+        raise ValueError("El costo de cambio de contexto no puede ser negativo.")
     if algorithm == "FCFS":
-        segs = _fcfs(procs)
+        segs = _fcfs(procs, switch_cost)
     elif algorithm == "SJF":
-        segs = _sjf(procs)
+        segs = _sjf(procs, switch_cost)
     elif algorithm == "SRTF":
-        segs = _srtf(procs)
+        segs = _srtf(procs, switch_cost)
     elif algorithm == "RR":
-        segs = _rr(procs, quantum)
+        segs = _rr(procs, quantum, switch_cost)
     else:
         raise ValueError(f"Algoritmo desconocido: {algorithm}")
     metrics = _metrics(procs, segs)
