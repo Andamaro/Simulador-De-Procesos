@@ -386,11 +386,18 @@ class SimulatorView(QWidget):
     def _read_table(self):
         procs = []
         for r in range(self.table.rowCount()):
+            cells = [self.table.item(r, c) for c in range(3)]
+            if any(c is None for c in cells):
+                return None, f"Fila {r + 1}: faltan datos."
+            name, arr, bur = (c.text().strip() for c in cells)
             try:
-                name = self.table.item(r, 0).text().strip()
-                procs.append(Process(name, int(self.table.item(r, 1).text()), int(self.table.item(r, 2).text())))
-            except (ValueError, AttributeError) as e:
-                return None, f"Fila {r + 1}: {e}" if str(e) else f"Fila {r + 1}: revisa los valores."
+                arrival, burst = int(arr), int(bur)
+            except ValueError:
+                return None, f"Fila {r + 1}: la llegada y la ejecución deben ser números enteros."
+            try:
+                procs.append(Process(name, arrival, burst))
+            except ValueError as e:
+                return None, f"Fila {r + 1}: {e}"
         return procs, ""
 
     # ------------------------------------------------------------ algoritmo

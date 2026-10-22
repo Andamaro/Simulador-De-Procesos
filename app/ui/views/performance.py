@@ -1,4 +1,3 @@
-from PySide6.QtCore import Qt
 from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (QButtonGroup, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
                                QScrollArea, QVBoxLayout, QWidget)
@@ -158,7 +157,15 @@ class PerformanceView(QWidget):
         if err:
             self.verdict.setText("")
             return
-        self.results = {k: simulate(k, procs, quantum, cost) for k in ALGORITMOS}
+        try:
+            self.results = {k: simulate(k, procs, quantum, cost) for k in ALGORITMOS}
+        except ValueError as e:
+            self.results = {}
+            self.msg.setText(f"Corrige la tabla de procesos en el Simulador: {e}")
+            self.msg.setVisible(True)
+            self.sheet.setVisible(False)
+            self.verdict.setText("")
+            return
         self.sums = {k: summary(r) for k, r in self.results.items()}
         self.items["RR"].title = f"Round Robin (q = {quantum})"
         best = min(s["e_prom"] for s in self.sums.values())
